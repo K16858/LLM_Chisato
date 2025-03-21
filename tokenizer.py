@@ -1,52 +1,72 @@
 import sentencepiece as spm
-from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, LlamaTokenizer
-from tokenizers.implementations import SentencePieceUnigramTokenizer
+from transformers import LlamaTokenizer
+import gc
+import os
 
 MODEL_PREFIX = "Chisato_test"
 OUTPUT_MODEL_DIR = "./tokenizer"
 
-spm.SentencePieceTrainer.train(
-    input="./corpus/corpus.txt",  # コーパスファイル
-    model_type="unigram",  # デフォルト
-    model_prefix=MODEL_PREFIX,  # 出力されるモデルのファイル名に使われる
-    add_dummy_prefix=False,# rinna-3.6bに習って、文章の先頭にスペースが追加されないように
-    byte_fallback=True,# 未知語をutf-8バイトに分解するために
-    vocab_size=32000,  # 32k 64kのサイズがいい説もある
-    character_coverage=0.9995,
-    unk_piece="<unk>",
-    pad_piece="<pad>",
-    pad_id=0,
-    unk_id=1,
-    bos_id=2,
-    eos_id=3,
-    input_sentence_size=12000000
-)
+# トークナイザーのトレーニングとモデル変換を分離する
+def train_tokenizer():
+    spm.SentencePieceTrainer.train(
+        input="./corpus/corpus.txt",
+        model_type="unigram",
+        model_prefix=MODEL_PREFIX,
+        add_dummy_prefix=False,
+        byte_fallback=True,
+        vocab_size=32000,
+        accept_language=["ja", "en"],
+        character_coverage=0.9995,
+        unk_piece="<unk>",
+        pad_piece="<pad>",
+        pad_id=0,
+        unk_id=1,
+        bos_id=2,
+        eos_id=3,
+        input_sentence_size=12000000
+    )
+    print(f"トークナイザーのトレーニング完了: {MODEL_PREFIX}.model")
 
-sp = spm.SentencePieceProcessor()
-sp.Load(MODEL_PREFIX+".model")
+def test_tokenizer():
+    sp = spm.SentencePieceProcessor()
+    sp.Load(MODEL_PREFIX + ".model")
 
-def tokenize(raw_text):
-    tokenized=sp.encode_as_pieces(raw_text)
-    return tokenized
+    # テストと検証
+    print("=== トークナイザーのテスト ===")
+    print(sp.encode_as_pieces("これは、テストです。"))
+    print(sp.encode_as_ids("これは、テストです。"))
+    print(sp.decode_pieces(['▁', 'これは', '、', 'テスト', 'です', '。']))
+    print(sp.decode_ids([381, 260, 1662, 279, 261]))
+    print(f"語彙サイズ: {sp.get_piece_size()}")
+    
+    # メモリ解放
+    del sp
+    gc.collect()
 
-# encode: text => is
-print(sp.encode_as_pieces("これは、テストです。"))
-print(sp.encode_as_ids("これは、テストです。"))
+def convert_to_hf_tokenizer():
+    tokenizer = LlamaTokenizer(
+        vocab_file=MODEL_PREFIX + ".model",
+        unk_token='<unk>',
+        bos_token='<s>',
+        eos_token='</s>',
+        pad_token='<pad>',
+        extra_ids=0
+    )
+    
+    os.makedirs(OUTPUT_MODEL_DIR, exist_ok=True)
+    tokenizer.save_pretrained(OUTPUT_MODEL_DIR)
+    print(f"HuggingFace形式のトークナイザーを保存しました: {OUTPUT_MODEL_DIR}")
 
-# decode: id => text
-print(sp.decode_pieces(['▁', 'これは', '、', 'テスト', 'です', '。']))
-print(sp.decode_ids([381, 260, 1662, 279, 261]))
-
-# check vocab size
-print(sp.get_piece_size())
-
-tokenizer = LlamaTokenizer(
-    vocab_file=MODEL_PREFIX+".model",
-    unk_token = '<unk>',
-    bos_token = '<s>',
-    eos_token = '</s>',
-    pad_token = '<pad>',
-    extra_ids=0,
-    model_max_length=1000000000000000019884624838656,
-)
-tokenizer.save_pretrained(OUTPUT_MODEL_DIR) 
+if __name__ == "__main__":
+    try:
+        # すでにモデルファイルが存在する場合はトレーニングをスキップ
+        if not os.path.exists(f"{MODEL_PREFIX}.model"):
+            train_tokenizer()
+            gc.collect()
+        
+        test_tokenizer()
+        convert_to_hf_tokenizer()
+        
+        print("全ての処理が正常に完了しました")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")

@@ -79,7 +79,7 @@ print(f"size: {model_size/1000**2:.1f}M parameters")
 training_args = TrainingArguments(
     output_dir="./model_output",
     overwrite_output_dir=True,
-    num_train_epochs=10,
+    num_train_epochs=5,
     per_device_train_batch_size=8,
     learning_rate=5e-4,
     save_steps=100_000,

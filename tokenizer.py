@@ -14,7 +14,7 @@ def train_tokenizer():
         model_prefix=MODEL_PREFIX,
         add_dummy_prefix=False,
         byte_fallback=True,
-        vocab_size=32000,
+        vocab_size=31996,
         accept_language=["ja", "en"],
         character_coverage=0.9995,
         unk_piece="<unk>",
@@ -23,7 +23,9 @@ def train_tokenizer():
         unk_id=1,
         bos_id=2,
         eos_id=3,
-        input_sentence_size=12000000
+        input_sentence_size=1000000,
+        seed_sentencepiece_size=1000000,  # シードサイズの制限
+        train_extremely_large_corpus=True  # 大規模コーパス用の設定
     )
     print(f"トークナイザーのトレーニング完了: {MODEL_PREFIX}.model")
 
@@ -50,12 +52,27 @@ def convert_to_hf_tokenizer():
         bos_token='<s>',
         eos_token='</s>',
         pad_token='<pad>',
-        extra_ids=0
+        extra_ids=0,
+        model_max_length=1024
     )
+    
+    # チャット用の特殊トークンを追加
+    special_tokens_dict = {
+        'sep_token': '<sep>',
+        'additional_special_tokens': [
+            '<|system|>',
+            '<|user|>',
+            '<|assistant|>'
+        ]
+    }
+    
+    # トークナイザーに特殊トークンを追加
+    tokenizer.add_special_tokens(special_tokens_dict)
     
     os.makedirs(OUTPUT_MODEL_DIR, exist_ok=True)
     tokenizer.save_pretrained(OUTPUT_MODEL_DIR)
     print(f"HuggingFace形式のトークナイザーを保存しました: {OUTPUT_MODEL_DIR}")
+    print(f"追加された特殊トークン: {tokenizer.additional_special_tokens}")
 
 if __name__ == "__main__":
     try:

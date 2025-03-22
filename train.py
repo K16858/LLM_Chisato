@@ -1,55 +1,41 @@
-
 from collections import OrderedDict
-from datasets import load_dataset, Dataset
+from datasets import Dataset
 from transformers import LlamaTokenizer, MistralForCausalLM, DataCollatorForLanguageModeling, TrainingArguments, Trainer, MistralConfig
 import torch
 import json
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import math
-
-def load_text_from_file(file_path, tokenizer, max_length=1024):
-    with open(file_path, 'r', encoding='utf-8') as f:
-        text = f.read()
-    
-    # トークン化して分割
-    tokenized_text = tokenizer(text)["input_ids"]
-    chunks = [tokenized_text[i:i + max_length] for i in range(0, len(tokenized_text), max_length)]
-    
-    # 既にトークン化されたデータを返す
-    return Dataset.from_dict({"input_ids": chunks})
+import gc
 
 # ファイルパスを指定
-file_path = "./corpus/corpus.txt"  # コーパスファイルのパス
 tokenizer_file = "./tokenizer"  # トークナイザーファイルのパス
 config_file = "./config.json"
+train_file = "./corpus/train_tokens.jsonl"
+val_file = "./corpus/val_tokens.jsonl"
 
-# 2. カスタムトークナイザーの読み込み（事前に保存してあるもの）
-# tokenizer = PreTrainedTokenizerFast(tokenizer_file="tokenizer.json")
+# トークナイザーの読み込み
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_file)
-# EOSトークンをPADトークンに設定（PADトークンあるけどね）
 tokenizer.pad_token = tokenizer.eos_token
 
-# データセットの作成
-dataset = load_text_from_file(file_path, tokenizer)
+def load_tokenized_dataset_from_file(file_path):
+    """保存したトークンデータを読み込む"""
+    token_sequences = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in tqdm(f, desc=f"Loading {file_path}"):
+            if line.strip():
+                tokens = json.loads(line.strip())
+                token_sequences.append({"input_ids": tokens})
+    
+    return Dataset.from_list(token_sequences)
 
-# 訓練用と検証用に分割（例：80%:20%の割合）
-split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
-dataset = {
-    "train": split_dataset["train"],
-    "validation": split_dataset["test"]
-}
+# 保存したデータセットを読み込む
+print("Loading tokenized datasets...")
+train_dataset = load_tokenized_dataset_from_file(train_file)
+val_dataset = load_tokenized_dataset_from_file(val_file)
 
-# 3. テキストをトークン化する関数の定義
-def tokenize_function(examples, max_length=128):
-    return tokenizer(examples["text"], truncation=True, max_length=max_length)
+print(f"Loaded {len(train_dataset)} training examples and {len(val_dataset)} validation examples")
 
-# 4. データセットにトークナイズを適用
-tokenized_datasets = {
-    "train": dataset["train"],
-    "validation": dataset["validation"]
-}
-
-# 5. データコラレーターの設定
+# データコラレーターの設定
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer, mlm=False
 )
@@ -62,12 +48,12 @@ def load_config_from_json(config_file):
 
 config = load_config_from_json(config_file)
 
-# 6. モデルの初期化
+# モデルの初期化
 model = MistralForCausalLM.from_pretrained(
     pretrained_model_name_or_path=None, 
     config=config, 
     state_dict=OrderedDict(),
-    attn_implementation="flash_attention_2"
+    # attn_implementation="flash_attention_2"
 )
 if torch.cuda.is_available():
     model = model.to(torch.device("cuda"))
@@ -75,7 +61,7 @@ if torch.cuda.is_available():
 model_size = sum(t.numel() for t in model.parameters())
 print(f"size: {model_size/1000**2:.1f}M parameters")
 
-# 7. トレーニング設定の定義
+# トレーニング設定の定義
 training_args = TrainingArguments(
     output_dir="./model_output",
     overwrite_output_dir=True,
@@ -86,27 +72,35 @@ training_args = TrainingArguments(
     save_total_limit=2,
     eval_strategy="steps",
     eval_steps=5000,
-    bf16=True,
-    torch_compile=True
+    # bf16=True,
+    fp16=True,
+    torch_compile=True,
+    # メモリ効率化のためのオプション
+    gradient_accumulation_steps=4,  # 勾配蓄積によるバッチサイズ実質増加
+    gradient_checkpointing=True,    # メモリ効率を優先（計算速度は犠牲に）
+    optim="adamw_torch"             # メモリ効率の良いオプティマイザ
 )
 
-# 8. Trainerの初期化
+# Trainerの初期化
 trainer = Trainer(
     model=model,
     args=training_args,
     data_collator=data_collator,
-    train_dataset=tokenized_datasets["train"],
-    eval_dataset=tokenized_datasets["validation"],
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
 )
 
+# メモリ節約のためにデータセットをキャッシュ
+# 必要なデータがメモリにロードされたら、参照を削除
+gc.collect()
+
 # Training
-print("[INFO] Strat training...")
+print("[INFO] Start training...")
 train_result = trainer.train()
 trainer.save_model()
 
 metrics = train_result.metrics
-
-metrics["train_samples"] = len(tokenized_datasets["train"])
+metrics["train_samples"] = len(train_dataset)
 
 trainer.log_metrics("train", metrics)
 trainer.save_metrics("train", metrics)
@@ -116,7 +110,7 @@ trainer.save_state()
 print("[INFO] Start evaluation...")
 metrics = trainer.evaluate()
 
-metrics["eval_samples"] = len(tokenized_datasets["validation"])
+metrics["eval_samples"] = len(val_dataset)
 try:
     perplexity = math.exp(metrics["eval_loss"])
 except OverflowError:
@@ -126,5 +120,5 @@ metrics["perplexity"] = perplexity
 trainer.log_metrics("eval", metrics)
 trainer.save_metrics("eval", metrics)
 
-# 10. トレーニング済みモデルの保存
+# トレーニング済みモデルの保存
 model.save_pretrained("./model_output")

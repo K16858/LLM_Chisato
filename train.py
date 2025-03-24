@@ -12,59 +12,49 @@ import os
 # ファイルパスを指定
 tokenizer_file = "./tokenizer"  # トークナイザーファイルのパス
 config_file = "./config.json"
-# train_file = "./corpus/train_tokens.jsonl"
-# val_file = "./corpus/val_tokens.jsonl"
-train_file = "./corpus/train_tokens.bin"
-val_file = "./corpus/val_tokens.bin"
+train_file = "./corpus/train_tokens.txt"
+val_file = "./corpus/val_tokens.txt"
 
 # トークナイザーの読み込み
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_file)
 tokenizer.pad_token = tokenizer.eos_token
 
 def load_tokenized_dataset_from_file(file_path):
-    """保存したトークンデータを読み込む"""
+    """テキスト形式からトークンデータを読み込む"""
     token_sequences = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in tqdm(f, desc=f"Loading {file_path}"):
             if line.strip():
-                tokens = json.loads(line.strip())
+                # スペース区切りの文字列を整数のリストに変換
+                tokens = [int(token) for token in line.strip().split()]
                 token_sequences.append({"input_ids": tokens})
     
     return Dataset.from_list(token_sequences)
 
-def load_tokens_binary(file_path):
-    """バイナリ形式で保存されたトークンデータを読み込む"""
-    print(f"Loading binary data from {file_path}...")
+def get_streaming_dataset(file_path, block_size=1024):
+    """ストリーミング方式でデータセットを読み込む"""
+    def generator():
+        with open(file_path, 'r', encoding='utf-8') as f:
+            buffer = []
+            for line in f:
+                if line.strip():
+                    tokens = [int(token) for token in line.strip().split()]
+                    buffer.extend(tokens)
+                    
+                    while len(buffer) >= block_size:
+                        yield {"input_ids": buffer[:block_size]}
+                        buffer = buffer[block_size:]
+            
+            # 残りのバッファも使用
+            if buffer:
+                yield {"input_ids": buffer}
     
-    with open(file_path, 'rb') as f:
-        # ヘッダーからシーケンス数を読み込む
-        num_sequences = np.fromfile(f, dtype=np.int32, count=1)[0]
-        
-        # 各シーケンスの長さを読み込む
-        lengths = np.fromfile(f, dtype=np.int32, count=num_sequences)
-        
-        # 残りのデータをトークンとして読み込む
-        total_tokens = sum(lengths)
-        all_tokens = np.fromfile(f, dtype=np.int32, count=total_tokens)
-    
-    # 長さ情報を使って元のシーケンスを再構築
-    token_sequences = []
-    idx = 0
-    for length in tqdm(lengths, desc="Reconstructing sequences"):
-        token_sequences.append({"input_ids": all_tokens[idx:idx+length].tolist()})
-        idx += length
-    
-    print(f"Loaded {len(token_sequences)} sequences from binary file")
-    print(f"Binary file size: {os.path.getsize(file_path) / (1024*1024):.2f} MB")
-    return Dataset.from_list(token_sequences)
+    return Dataset.from_generator(generator)
 
 # 保存したデータセットを読み込む
-# print("Loading tokenized datasets...")
-# train_dataset = load_tokenized_dataset_from_file(train_file)
-# val_dataset = load_tokenized_dataset_from_file(val_file)
-print("Loading tokenized datasets from binary files...")
-train_dataset = load_tokens_binary(train_file)
-val_dataset = load_tokens_binary(val_file)
+print("Loading tokenized datasets...")
+train_dataset = get_streaming_dataset(train_file, block_size=1024)
+val_dataset = get_streaming_dataset(val_file, block_size=1024)
 
 print(f"Loaded {len(train_dataset)} training examples and {len(val_dataset)} validation examples")
 
@@ -94,24 +84,27 @@ if torch.cuda.is_available():
 model_size = sum(t.numel() for t in model.parameters())
 print(f"size: {model_size/1000**2:.1f}M parameters")
 
-# トレーニング設定
 training_args = TrainingArguments(
     output_dir="./model_output",
     overwrite_output_dir=True,
-    num_train_epochs=5,
-    per_device_train_batch_size=8,
+    num_train_epochs=1, 
+    per_device_train_batch_size=4,  # 要調整
     learning_rate=5e-4,
-    save_steps=100_000,
-    save_total_limit=2,
+    lr_scheduler_type="cosine",  # コサインスケジュールを
+    warmup_steps=10000,  # ウォームアップステップ
+    save_steps=20000,
+    save_total_limit=3,
     eval_strategy="steps",
-    eval_steps=5000,
+    eval_steps=20000,  # 評価頻度も調整
+    load_best_model_at_end=True,  # 最良モデルをロード
     # bf16=True,
     fp16=True,
     torch_compile=True,
-    # メモリ効率化のためのオプション
-    gradient_accumulation_steps=4,
+    gradient_accumulation_steps=8,  # 増やして実効バッチサイズを維持
     gradient_checkpointing=True,
-    optim="adamw_torch"
+    optim="adamw_torch",
+    # 訓練再開
+    resume_from_checkpoint=True if os.path.exists("./model_output/checkpoint-*") else None,
 )
 
 # Trainerの初期化
@@ -121,10 +114,9 @@ trainer = Trainer(
     data_collator=data_collator,
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
+    # deepspeed="ds_config.json"  # DeepSpeed設定ファイル
 )
 
-# メモリ節約のためにデータセットをキャッシュ
-# 必要なデータがメモリにロードされたら、参照を削除
 gc.collect()
 
 # Training
@@ -134,6 +126,7 @@ trainer.save_model()
 
 metrics = train_result.metrics
 metrics["train_samples"] = len(train_dataset)
+metrics["eval_samples"] = len(val_dataset)
 
 trainer.log_metrics("train", metrics)
 trainer.save_metrics("train", metrics)

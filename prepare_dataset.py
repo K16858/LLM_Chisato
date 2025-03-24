@@ -81,7 +81,7 @@ def load_text_tokens(file_path):
 # メインプログラムの変更例
 if __name__ == "__main__":
     # ファイルパスを指定
-    file_path = "./corpus/output2.txt"  # コーパスファイルのパス
+    file_path = "./corpus/output3.txt"  # コーパスファイルのパス
     tokenizer_file = "./tokenizer"  # トークナイザーファイルのパス
     
     # 出力先

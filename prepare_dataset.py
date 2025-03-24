@@ -105,9 +105,3 @@ if __name__ == "__main__":
     
     print(f"Text dataset preparation completed! Train: {train_count} sequences, Val: {val_count} sequences")
     
-    # 生成されたファイルが正しいか確認
-    print("Verifying saved files...")
-    train_tokens = load_text_tokens(train_file_txt)
-    print(f"Loaded {len(train_tokens)} training sequences from text file")
-    val_tokens = load_text_tokens(val_file_txt)
-    print(f"Loaded {len(val_tokens)} validation sequences from text file")

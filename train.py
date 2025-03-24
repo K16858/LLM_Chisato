@@ -5,13 +5,17 @@ import torch
 import json
 from tqdm import tqdm
 import math
+import numpy as np
 import gc
+import os
 
 # ファイルパスを指定
 tokenizer_file = "./tokenizer"  # トークナイザーファイルのパス
 config_file = "./config.json"
-train_file = "./corpus/train_tokens.jsonl"
-val_file = "./corpus/val_tokens.jsonl"
+# train_file = "./corpus/train_tokens.jsonl"
+# val_file = "./corpus/val_tokens.jsonl"
+train_file = "./corpus/train_tokens.bin"
+val_file = "./corpus/val_tokens.bin"
 
 # トークナイザーの読み込み
 tokenizer = LlamaTokenizer.from_pretrained(tokenizer_file)
@@ -28,10 +32,39 @@ def load_tokenized_dataset_from_file(file_path):
     
     return Dataset.from_list(token_sequences)
 
+def load_tokens_binary(file_path):
+    """バイナリ形式で保存されたトークンデータを読み込む"""
+    print(f"Loading binary data from {file_path}...")
+    
+    with open(file_path, 'rb') as f:
+        # ヘッダーからシーケンス数を読み込む
+        num_sequences = np.fromfile(f, dtype=np.int32, count=1)[0]
+        
+        # 各シーケンスの長さを読み込む
+        lengths = np.fromfile(f, dtype=np.int32, count=num_sequences)
+        
+        # 残りのデータをトークンとして読み込む
+        total_tokens = sum(lengths)
+        all_tokens = np.fromfile(f, dtype=np.int32, count=total_tokens)
+    
+    # 長さ情報を使って元のシーケンスを再構築
+    token_sequences = []
+    idx = 0
+    for length in tqdm(lengths, desc="Reconstructing sequences"):
+        token_sequences.append({"input_ids": all_tokens[idx:idx+length].tolist()})
+        idx += length
+    
+    print(f"Loaded {len(token_sequences)} sequences from binary file")
+    print(f"Binary file size: {os.path.getsize(file_path) / (1024*1024):.2f} MB")
+    return Dataset.from_list(token_sequences)
+
 # 保存したデータセットを読み込む
-print("Loading tokenized datasets...")
-train_dataset = load_tokenized_dataset_from_file(train_file)
-val_dataset = load_tokenized_dataset_from_file(val_file)
+# print("Loading tokenized datasets...")
+# train_dataset = load_tokenized_dataset_from_file(train_file)
+# val_dataset = load_tokenized_dataset_from_file(val_file)
+print("Loading tokenized datasets from binary files...")
+train_dataset = load_tokens_binary(train_file)
+val_dataset = load_tokens_binary(val_file)
 
 print(f"Loaded {len(train_dataset)} training examples and {len(val_dataset)} validation examples")
 
@@ -61,7 +94,7 @@ if torch.cuda.is_available():
 model_size = sum(t.numel() for t in model.parameters())
 print(f"size: {model_size/1000**2:.1f}M parameters")
 
-# トレーニング設定の定義
+# トレーニング設定
 training_args = TrainingArguments(
     output_dir="./model_output",
     overwrite_output_dir=True,
@@ -76,9 +109,9 @@ training_args = TrainingArguments(
     fp16=True,
     torch_compile=True,
     # メモリ効率化のためのオプション
-    gradient_accumulation_steps=4,  # 勾配蓄積によるバッチサイズ実質増加
-    gradient_checkpointing=True,    # メモリ効率を優先（計算速度は犠牲に）
-    optim="adamw_torch"             # メモリ効率の良いオプティマイザ
+    gradient_accumulation_steps=4,
+    gradient_checkpointing=True,
+    optim="adamw_torch"
 )
 
 # Trainerの初期化

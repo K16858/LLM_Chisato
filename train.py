@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from datasets import Dataset
+from datasets import Dataset, IterableDataset
 from transformers import LlamaTokenizer, MistralForCausalLM, DataCollatorForLanguageModeling, TrainingArguments, Trainer, MistralConfig
 import torch
 import json
@@ -49,14 +49,12 @@ def get_streaming_dataset(file_path, block_size=1024):
             if buffer:
                 yield {"input_ids": buffer}
     
-    return Dataset.from_generator(generator)
+    return IterableDataset.from_generator(generator)
 
 # 保存したデータセットを読み込む
 print("Loading tokenized datasets...")
 train_dataset = get_streaming_dataset(train_file, block_size=1024)
 val_dataset = get_streaming_dataset(val_file, block_size=1024)
-
-print(f"Loaded {len(train_dataset)} training examples and {len(val_dataset)} validation examples")
 
 # データコラレーターの設定
 data_collator = DataCollatorForLanguageModeling(
@@ -76,7 +74,7 @@ model = MistralForCausalLM.from_pretrained(
     pretrained_model_name_or_path=None, 
     config=config, 
     state_dict=OrderedDict(),
-    # attn_implementation="flash_attention_2"
+    attn_implementation="flash_attention_2"
 )
 if torch.cuda.is_available():
     model = model.to(torch.device("cuda"))
